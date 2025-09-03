@@ -15,6 +15,9 @@
 #include <vsprintf.h>
 #include <dm/uclass.h>
 #include <dm/device.h>
+#if IS_ENABLED(CONFIG_NPCM_AES)
+#include <asm/arch/aes.h>
+#endif
 
 u32 aes_get_key_len(char *command)
 {
@@ -294,6 +297,60 @@ static int do_aes(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
 		return CMD_RET_USAGE;
 }
 
+#if IS_ENABLED(CONFIG_NPCM_AES)
+static int do_aes_otp(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	ulong iv_addr, src_addr, dst_addr, len, fkeyind;
+	uint8_t *iv_ptr, *src_ptr, *dst_ptr;
+	uint32_t aes_blocks;
+	int enc, ret;
+
+	if (argc != 7)
+		return CMD_RET_USAGE;
+
+	if (!strncmp(argv[1], "enc", 3))
+		enc = 1;
+	else if (!strncmp(argv[1], "dec", 3))
+		enc = 0;
+	else
+		return CMD_RET_USAGE;
+
+	fkeyind = hextoul(argv[2], NULL);
+	iv_addr = hextoul(argv[3], NULL);
+	src_addr = hextoul(argv[4], NULL);
+	dst_addr = hextoul(argv[5], NULL);
+	len = hextoul(argv[6], NULL);
+
+	if (fkeyind >= 4 || !len || len % AES_BLOCK_LENGTH ||
+	    len / AES_BLOCK_LENGTH > UINT_MAX)
+		return CMD_RET_USAGE;
+
+	ret = npcm_aes_select_key(fkeyind);
+	if (ret)
+		return CMD_RET_FAILURE;
+
+	iv_ptr = (uint8_t *)map_sysmem(iv_addr, AES_BLOCK_LENGTH);
+	src_ptr = (uint8_t *)map_sysmem(src_addr, len);
+	dst_ptr = (uint8_t *)map_sysmem(dst_addr, len);
+
+	/* Calculate the number of AES blocks to encrypt. */
+	aes_blocks = len / AES_BLOCK_LENGTH;
+
+	if (enc)
+		aes_cbc_encrypt_blocks(0, NULL, iv_ptr, src_ptr, dst_ptr,
+				       aes_blocks);
+	else
+		aes_cbc_decrypt_blocks(0, NULL, iv_ptr, src_ptr, dst_ptr,
+				       aes_blocks);
+
+	unmap_sysmem(iv_ptr);
+	unmap_sysmem(src_ptr);
+	unmap_sysmem(dst_ptr);
+
+	return CMD_RET_SUCCESS;
+}
+#endif
+
 /***************************************************/
 U_BOOT_LONGHELP(aes,
 	"[.128,.192,.256] enc key iv src dst len - CBC encrypt block of data $len bytes long\n"
@@ -342,3 +399,22 @@ U_BOOT_CMD(
 	"AES 128/192/256 operations",
 	aes_help_text
 );
+#if IS_ENABLED(CONFIG_NPCM_AES)
+U_BOOT_LONGHELP(aes_otp,
+	"aes_otp enc key_index iv src dst len - Encrypt block of data $len bytes long\n"
+	"                             at address $src using a key in OTP\n"
+	"                             $iv. Store the result at address $dst.\n"
+	"                             The $len size must be multiple of 16 bytes.\n"
+	"                             The $iv must be 16 bytes long.\n"
+	"aes_otp dec key_index iv src dst len - Decrypt block of data $len bytes long\n"
+	"                             at address $src using a key in OTP\n"
+	"                             $iv. Store the result at address $dst.\n"
+	"                             The $len size must be multiple of 16 bytes.\n"
+	"                             The $iv must be 16 bytes long.");
+
+U_BOOT_CMD(
+	aes_otp, 7, 1, do_aes_otp,
+	"AES HW encryption",
+	aes_otp_help_text
+);
+#endif
