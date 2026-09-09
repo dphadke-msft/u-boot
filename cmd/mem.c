@@ -316,9 +316,9 @@ static int do_mem_cp(struct cmd_tbl *cmdtp, int flag, int argc,
 	ulong	addr, dest, count;
 	void	*src, *dst;
 	int	size;
-#if defined (CONFIG_ARCH_NPCM) && defined (CONFIG_DM_SPI_FLASH)
-	static struct spi_flash *flash;
-	int region_size = SPI_FLASH_REGION_SIZE;
+#if defined(CONFIG_ARCH_NPCM) && defined(CONFIG_DM_SPI_FLASH)
+	struct spi_flash *flash;
+	ulong region_size = SPI_FLASH_REGION_SIZE;
 	ulong flash_base = 0;
 	int bus;
 	int cs;
@@ -346,6 +346,9 @@ static int do_mem_cp(struct cmd_tbl *cmdtp, int flag, int argc,
 		return 1;
 	}
 
+	if (count > ULONG_MAX / size)
+		return CMD_RET_FAILURE;
+
 	src = map_sysmem(addr, count * size);
 	dst = map_sysmem(dest, count * size);
 
@@ -369,53 +372,59 @@ static int do_mem_cp(struct cmd_tbl *cmdtp, int flag, int argc,
 		return 0;
 	}
 #endif
-#if defined (CONFIG_ARCH_NPCM) && defined (CONFIG_DM_SPI_FLASH)
-	if ((dest >= SPI0_BASE_ADDR) &&  (dest < SPI0_END_ADDR)) {
+#if defined(CONFIG_ARCH_NPCM) && defined(CONFIG_DM_SPI_FLASH)
+	if (dest >= SPI0_BASE_ADDR && dest <= SPI0_END_ADDR) {
 		bus = 0;
 		cs = (dest - SPI0_BASE_ADDR) / SPI_FLASH_REGION_SIZE;
 		flash_base = SPI0_BASE_ADDR + cs * SPI_FLASH_REGION_SIZE;
 	}
 #ifdef CONFIG_ARCH_NPCM8XX
-	if ((dest >= SPI1_BASE_ADDR) && (dest < SPI1_END_ADDR)) {
+	if (dest >= SPI1_BASE_ADDR && dest <= SPI1_END_ADDR) {
 		bus = 1;
 		cs = (dest - SPI1_BASE_ADDR) / SPI1_FLASH_REGION_SIZE;
 		flash_base = SPI1_BASE_ADDR + cs * SPI1_FLASH_REGION_SIZE;
 		region_size = SPI1_FLASH_REGION_SIZE;
 	}
 #endif
-	if ((dest >= SPI3_BASE_ADDR) && (dest < SPI3_END_ADDR)) {
+	if (dest >= SPI3_BASE_ADDR && dest <= SPI3_END_ADDR) {
 		bus = 3;
 		cs = (dest - SPI3_BASE_ADDR) / SPI_FLASH_REGION_SIZE;
 		flash_base = SPI3_BASE_ADDR + cs * SPI_FLASH_REGION_SIZE;
 	}
 	/* copying to SPI Flash */
 	if (flash_base > 0) {
-		int	ret;
-		char *src, *buf;
+		int ret = -EINVAL;
+		char *flash_src = src, *buf = NULL;
 		u32 len, sector_addr, sector_offset;
 		u32 dest_addr, end_addr;
 		int chunk_sz;
 		struct udevice *new;
 
-		if (((dest + count * size) - flash_base) > region_size ) {
+		dest_addr = dest - flash_base;
+		if (count > (region_size - dest_addr) / size) {
 			printf("Copying to multiple chips is not supported!\n");
-			return 1;
+			goto spi_done;
 		}
 
-		src = (char *)addr;
 		printf("Copy %lu bytes from 0x%lx to 0x%lx(bus:%d cs:%d)\n",
-			count*size, addr, dest, bus, cs);
+		       count * size, addr, dest, bus, cs);
 
 		ret = spi_flash_probe_bus_cs(bus, cs, &new);
 		if (ret)
-			return 1;
+			goto spi_done;
 
 		flash = dev_get_uclass_priv(new);
-		if (!flash)
-			return 1;
+		if (!flash || !flash->erase_size) {
+			ret = -EINVAL;
+			goto spi_done;
+		}
 
-		src = (char *)addr;
-		dest_addr = dest - flash_base;
+		if (dest_addr >= flash->size ||
+		    count > (flash->size - dest_addr) / size) {
+			printf("Copy exceeds flash size!\n");
+			ret = -EINVAL;
+			goto spi_done;
+		}
 		end_addr = dest_addr + count * size;
 		len = count * size;
 		/*
@@ -427,6 +436,10 @@ static int do_mem_cp(struct cmd_tbl *cmdtp, int flag, int argc,
 		 */
 
 		buf = memalign(ARCH_DMA_MINALIGN, flash->erase_size);
+		if (!buf) {
+			ret = -ENOMEM;
+			goto spi_done;
+		}
 		printf("Copy %d bytes to flash\n", len);
 		newline = 64;
 
@@ -441,7 +454,7 @@ static int do_mem_cp(struct cmd_tbl *cmdtp, int flag, int argc,
 				printf("Read ERROR @ %#x\n", sector_addr);
 				break;
 			}
-			if (memcmp(src, buf + sector_offset, chunk_sz) == 0) {
+			if (memcmp(flash_src, buf + sector_offset, chunk_sz) == 0) {
 				printf(".");
 				if (--newline == 0) {
 					printf("\n");
@@ -449,7 +462,7 @@ static int do_mem_cp(struct cmd_tbl *cmdtp, int flag, int argc,
 				}
 				/* source and target are the same, skip programming */
 				dest_addr += chunk_sz;
-				src += chunk_sz;
+				flash_src += chunk_sz;
 				len -= chunk_sz;
 				continue;
 			}
@@ -460,9 +473,11 @@ static int do_mem_cp(struct cmd_tbl *cmdtp, int flag, int argc,
 				ret = spi_flash_erase(flash, sector_addr, flash->erase_size);
 				debug("SF: %zu bytes @ %#x Erased: %s\n", (size_t)flash->erase_size,
 						sector_addr, ret ? "ERROR" : "OK");
+				if (ret)
+					break;
 
 				/* update buf */
-				memcpy(buf + sector_offset, src, chunk_sz);
+				memcpy(buf + sector_offset, flash_src, chunk_sz);
 
 				/* program sector */
 				ret = spi_flash_write(flash, sector_addr, flash->erase_size, buf);
@@ -478,20 +493,27 @@ static int do_mem_cp(struct cmd_tbl *cmdtp, int flag, int argc,
 				ret = spi_flash_erase(flash, sector_addr, flash->erase_size);
 				debug("SF: %zu bytes @ %#x Erased: %s\n", (size_t)flash->erase_size,
 						sector_addr, ret ? "ERROR" : "OK");
+				if (ret)
+					break;
 
 				/* program sector */
-				ret = spi_flash_write(flash, sector_addr, chunk_sz, src);
+				ret = spi_flash_write(flash, sector_addr, chunk_sz, flash_src);
 				debug("SF: %zu bytes @ %#x Written: %s\n", (size_t)chunk_sz,
 						sector_addr, ret ? "ERROR" : "OK");
 			}
+			if (ret)
+				break;
 			dest_addr += chunk_sz;
-			src += chunk_sz;
+			flash_src += chunk_sz;
 			len -= chunk_sz;
 		}
 		printf("\n");
+spi_done:
 		free(buf);
+		unmap_sysmem(src);
+		unmap_sysmem(dst);
 
-		return 0;
+		return ret ? CMD_RET_FAILURE : CMD_RET_SUCCESS;
 	}
 #endif
 
