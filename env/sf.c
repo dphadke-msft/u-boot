@@ -47,16 +47,22 @@ __weak int spi_get_env_dev(void)
 #endif
 }
 
+__weak int spi_get_env_cs(void)
+{
+	return CONFIG_ENV_SPI_CS;
+}
+
 static int setup_flash_device(struct spi_flash **env_flash)
 {
+	int cs = spi_get_env_cs();
+
 #if CONFIG_IS_ENABLED(DM_SPI_FLASH)
 	struct udevice *new;
 	int	ret;
 	int dev = spi_get_env_dev();
 
 	/* speed and mode will be read from DT */
-	ret = spi_flash_probe_bus_cs(dev, CONFIG_ENV_SPI_CS,
-				     &new);
+	ret = spi_flash_probe_bus_cs(dev, cs, &new);
 	if (ret) {
 		env_set_default("spi_flash_probe_bus_cs() failed", 0);
 		return ret;
@@ -64,7 +70,7 @@ static int setup_flash_device(struct spi_flash **env_flash)
 
 	*env_flash = dev_get_uclass_priv(new);
 #else
-	*env_flash = spi_flash_probe(CONFIG_ENV_SPI_BUS, CONFIG_ENV_SPI_CS,
+	*env_flash = spi_flash_probe(CONFIG_ENV_SPI_BUS, cs,
 				     CONFIG_ENV_SPI_MAX_HZ, CONFIG_ENV_SPI_MODE);
 	if (!*env_flash) {
 		env_set_default("spi_flash_probe() failed", 0);

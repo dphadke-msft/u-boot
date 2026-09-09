@@ -777,4 +777,13 @@ int dm_spi_get_mmap(struct udevice *dev, ulong *map_basep, uint *map_sizep,
 
 int spi_get_env_dev(void);
 
+/**
+ * spi_get_env_cs() - Select the SPI flash chip select for the environment
+ *
+ * Boards may override the default CONFIG_ENV_SPI_CS for recovery boot.
+ *
+ * Return: SPI flash chip select
+ */
+int spi_get_env_cs(void);
+
 #endif	/* _SPI_H_ */

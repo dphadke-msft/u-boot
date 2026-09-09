@@ -5,6 +5,7 @@
 
 #include <dm.h>
 #include <event.h>
+#include <spi.h>
 #include <asm/io.h>
 #include <linux/bitfield.h>
 #include <asm/arch/gfx.h>
