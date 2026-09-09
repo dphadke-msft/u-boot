@@ -140,6 +140,19 @@ static int mem_test_cp_l(struct unit_test_state *uts)
 }
 MEM_TEST(mem_test_cp_l);
 
+static int mem_test_cp_overflow(struct unit_test_state *uts)
+{
+	ulong count = ULONG_MAX / sizeof(u32) + 1;
+
+	ut_asserteq(CMD_RET_FAILURE,
+		    run_commandf("cp.l 0 1000 %lx", count));
+	ut_assert_nextline("Copy size overflows address space");
+	ut_assert_console_end();
+
+	return 0;
+}
+UNIT_TEST(mem_test_cp_overflow, UTF_CONSOLE, mem);
+
 #if MEM_SUPPORT_64BIT_DATA
 static int mem_test_cp_q(struct unit_test_state *uts)
 {

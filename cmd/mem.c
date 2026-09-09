@@ -346,8 +346,10 @@ static int do_mem_cp(struct cmd_tbl *cmdtp, int flag, int argc,
 		return 1;
 	}
 
-	if (count > ULONG_MAX / size)
+	if (count > ULONG_MAX / size) {
+		puts("Copy size overflows address space\n");
 		return CMD_RET_FAILURE;
+	}
 
 	src = map_sysmem(addr, count * size);
 	dst = map_sysmem(dest, count * size);
