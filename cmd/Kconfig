@@ -2468,6 +2468,7 @@ config CMD_EXCEPTION
 
 config CMD_GFX
 	bool "Enable GFX test"
+	depends on ARCH_NPCM
 	help
 	  Enable test commands for GFX.
 

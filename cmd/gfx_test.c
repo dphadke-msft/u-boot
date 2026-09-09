@@ -1,13 +1,15 @@
 #include <stdlib.h>
-//#include <string.h>
+#include <stdio.h>
 #include <command.h>
-#include <common.h>
 #include <dm.h>
+#include <env.h>
 #include <rand.h>
+#include <vsprintf.h>
 #include <asm/io.h>
-//#include <asm/arch/cpu.h>
 #include <asm/arch/gfx.h>
 #include <linux/delay.h>
+#include <linux/kernel.h>
+#include <linux/string.h>
 
 typedef enum CommandType
 {
