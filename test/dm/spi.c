@@ -3,6 +3,7 @@
  * Copyright (C) 2013 Google, Inc
  */
 
+#include <command.h>
 #include <dm.h>
 #include <fdtdec.h>
 #include <spi.h>
@@ -216,3 +217,38 @@ static int dm_test_spi_xfer(struct unit_test_state *uts)
 	return 0;
 }
 DM_TEST(dm_test_spi_xfer, UTF_SCAN_PDATA | UTF_SCAN_FDT);
+
+#if CONFIG_IS_ENABLED(CMD_SPI)
+static int dm_test_spi_command(struct unit_test_state *uts)
+{
+	char *const repeat_argv[] = { "sspi" };
+	int repeatable = 1;
+
+	ut_assertok(run_command("sspi 0:0 32 9f000000", 0));
+	ut_assert_nextlinen("SF: Detected m25p16 ");
+	ut_assert_nextline("FF202015");
+	ut_assertok(cmd_process(CMD_FLAG_REPEAT, 1, repeat_argv,
+			       &repeatable, NULL));
+	ut_assert_nextline("FF202015");
+
+	ut_assertok(run_command("sspi 0:0 8 9f 24", 0));
+	ut_assert_nextline("202015");
+	ut_assertok(cmd_process(CMD_FLAG_REPEAT, 1, repeat_argv,
+			       &repeatable, NULL));
+	ut_assert_nextline("202015");
+
+	ut_asserteq(CMD_RET_FAILURE,
+		    run_command("sspi 0:0 8 ff 8", 0));
+	ut_assert_nextline("Error -5 during SPI transaction");
+	ut_asserteq(CMD_RET_FAILURE, run_command("sspi 0:0 8 ff", 0));
+	ut_assert_nextline("Error -5 during SPI transaction");
+	ut_assertok(run_command("sspi 0:0 8 9f 24", 0));
+	ut_assert_nextline("202015");
+	ut_assert_console_end();
+
+	sandbox_sf_unbind_emul(state_get_current(), 0, 0);
+
+	return 0;
+}
+DM_TEST(dm_test_spi_command, UTF_SCAN_PDATA | UTF_SCAN_FDT | UTF_CONSOLE);
+#endif
