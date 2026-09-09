@@ -285,8 +285,8 @@ static void npcm_pcie_rc_init_config_window(struct npcm_pcie *pcie)
 		size = fdtdec_get_number(ranges, size_cells);
 		ranges += size_cells;
 		bit_size = find_first_bit(&size, 32);
-		debug( "region %d, pci_addr=%llx, addr=%llx, size=%lx ,flags=%x\n",
-				__func__, i, pci_addr, cpu_addr, size, flags);
+		debug("region %d, pci_addr=%llx, addr=%llx, size=%lx, flags=%x\n",
+		      i, pci_addr, cpu_addr, size, flags);
 
 		switch (DT_FLAGS_TO_TYPE(flags)) {
 			case DT_TYPE_IO:
