@@ -64,10 +64,15 @@ static int do_spi_xfer(int bus, int cs)
 
 	if (rx_bitlen) {
 		/* rx_bitlen is specified, half-duplex transfer */
-		spi_xfer(slave, tx_bitlen, dout, NULL, SPI_XFER_BEGIN);
-		spi_xfer(slave, rx_bitlen, NULL, din, SPI_XFER_END);
-	} else
-		spi_xfer(slave, tx_bitlen, dout, din, SPI_XFER_BEGIN | SPI_XFER_END);
+		ret = spi_xfer(slave, tx_bitlen, dout, NULL, SPI_XFER_BEGIN);
+		if (!ret)
+			ret = spi_xfer(slave, rx_bitlen, NULL, din, SPI_XFER_END);
+		else
+			spi_xfer(slave, 0, NULL, NULL, SPI_XFER_END);
+	} else {
+		ret = spi_xfer(slave, tx_bitlen, dout, din,
+			       SPI_XFER_BEGIN | SPI_XFER_END);
+	}
 #if !CONFIG_IS_ENABLED(DM_SPI)
 	/* We don't get an error code in this case */
 	if (ret)
@@ -76,12 +81,10 @@ static int do_spi_xfer(int bus, int cs)
 	if (ret) {
 		printf("Error %d during SPI transaction\n", ret);
 	} else {
+		int print_bitlen = rx_bitlen ? rx_bitlen : tx_bitlen;
 		int j;
 
-		/* rx_bitlen is not specified, full-duplex transfer */
-		if (!rx_bitlen)
-			rx_bitlen = tx_bitlen;
-		for (j = 0; j < ((rx_bitlen + 7) / 8); j++)
+		for (j = 0; j < ((print_bitlen + 7) / 8); j++)
 			printf("%02X", din[j]);
 		printf("\n");
 	}
@@ -111,7 +114,6 @@ int do_spi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
 	uchar tmp;
 	int   j;
 
-	rx_bitlen = 0;
 	/*
 	 * We use the last specified parameters, unless new ones are
 	 * entered.
@@ -121,6 +123,7 @@ int do_spi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
 
 	if ((flag & CMD_FLAG_REPEAT) == 0)
 	{
+		rx_bitlen = 0;
 		if (argc < 2)
 			return CMD_RET_USAGE;
 
