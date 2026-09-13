@@ -28,6 +28,8 @@
 #include <openssl/engine.h>
 #include <openssl/err.h>
 
+#define ECDSA_KEY_ID_LEN	1024
+
 /* Image signing context for openssl-libcrypto */
 struct signer {
 	EVP_PKEY *evp_key;	/* Pointer to EVP_PKEY object */
@@ -182,11 +184,12 @@ static int read_engine_key(struct signer *ctx,
 			   const struct image_sign_info *info)
 {
 	const char *engine_id = ENGINE_get_id(ctx->engine);
-	char key_id[1024];
+	char key_id[ECDSA_KEY_ID_LEN];
 
 	if (info->keyfile) {
 		snprintf(key_id, sizeof(key_id), "%s", info->keyfile);
 	} else if (engine_id && !strcmp(engine_id, "pkcs11")) {
+		/* PKCS#11 uses a URI; generic engines use keydir as a prefix. */
 		if (info->keydir) {
 			if (strstr(info->keydir, "object="))
 				snprintf(key_id, sizeof(key_id),
@@ -222,7 +225,7 @@ static int read_engine_key(struct signer *ctx,
 		return ecdsa_err("Engine key loading failed");
 	}
 
-	if (EVP_PKEY_id(ctx->evp_key) != EVP_PKEY_EC) {
+	if (EVP_PKEY_base_id(ctx->evp_key) != EVP_PKEY_EC) {
 		fprintf(stderr, "Engine key '%s' is not an ECDSA key\n", key_id);
 		return -EINVAL;
 	}
@@ -273,7 +276,7 @@ static int init_engine(struct signer *ctx, const char *engine_id)
 static int prepare_ctx(struct signer *ctx, const struct image_sign_info *info)
 {
 	int key_len_bytes, ret;
-	char kname[1024];
+	char kname[ECDSA_KEY_ID_LEN];
 
 	memset(ctx, 0, sizeof(*ctx));
 
