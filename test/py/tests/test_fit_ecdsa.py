@@ -31,8 +31,9 @@ class SignableFitImage(object):
         for prop, value in prop_value.items():
             util.run_and_log(self.cons, f'fdtput -ts {self.fit} {node} {prop} {value}')
 
-    def get_binary(self, node, prop):
-        numbers = util.run_and_log(self.cons, f'fdtget -tbi {self.fit} {node} {prop}')
+    def get_binary(self, node, prop, file_name=None):
+        file_name = file_name or self.fit
+        numbers = util.run_and_log(self.cons, f'fdtget -tbi {file_name} {node} {prop}')
 
         bignum = bytearray()
         for little_num in numbers.split():
@@ -162,5 +163,5 @@ def test_fit_ecdsa_engine(u_boot_console):
 
     assert util.run_and_log(cons, f'fdtget -ts {key_dtb} /signature/default-key '
                                   'ecdsa,curve').strip() == 'prime256v1'
-    assert len(fit.get_binary('/signature/default-key', 'ecdsa,x-point')) == 32
-    assert len(fit.get_binary('/signature/default-key', 'ecdsa,y-point')) == 32
+    assert len(fit.get_binary('/signature/default-key', 'ecdsa,x-point', key_dtb)) == 32
+    assert len(fit.get_binary('/signature/default-key', 'ecdsa,y-point', key_dtb)) == 32

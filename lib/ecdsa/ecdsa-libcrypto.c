@@ -199,12 +199,12 @@ static int read_engine_key(struct signer *ctx,
 					 "pkcs11:%s;object=%s;type=private",
 					 info->keydir, info->keyname);
 			else
-				return -EINVAL;
+				goto err_key_id;
 		} else if (info->keyname) {
 			snprintf(key_id, sizeof(key_id),
 				 "pkcs11:object=%s;type=private", info->keyname);
 		} else {
-			return -EINVAL;
+			goto err_key_id;
 		}
 	} else if (engine_id) {
 		if (info->keydir && info->keyname)
@@ -213,16 +213,18 @@ static int read_engine_key(struct signer *ctx,
 		else if (info->keyname)
 			snprintf(key_id, sizeof(key_id), "%s", info->keyname);
 		else
-			return -EINVAL;
+			goto err_key_id;
 	} else {
-		return -ENOTSUP;
+		goto err_key_id;
 	}
 
 	ctx->evp_key = ENGINE_load_private_key(ctx->engine, key_id, NULL, NULL);
 	if (!ctx->evp_key) {
-		fprintf(stderr, "Can not load ECDSA key '%s' from engine '%s'\n",
-			key_id, info->engine_id);
-		return ecdsa_err("Engine key loading failed");
+		unsigned long ssl_err = ERR_get_error();
+
+		fprintf(stderr, "Can not load ECDSA key '%s' from engine '%s': %s\n",
+			key_id, engine_id, ERR_error_string(ssl_err, NULL));
+		return -EIO;
 	}
 
 	if (EVP_PKEY_base_id(ctx->evp_key) != EVP_PKEY_EC) {
@@ -238,6 +240,11 @@ static int read_engine_key(struct signer *ctx,
 	}
 
 	return 0;
+
+err_key_id:
+	fprintf(stderr, "Can not derive ECDSA key identifier for engine '%s'; "
+		"use keyfile, keyname, or keydir with keyname\n", engine_id);
+	return -EINVAL;
 }
 
 static int init_engine(struct signer *ctx, const char *engine_id)
