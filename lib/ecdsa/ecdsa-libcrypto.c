@@ -145,6 +145,16 @@ static int ecdsa_err(const char *msg)
 	return -EIO;
 }
 
+static int ecdsa_engine_err(const char *operation, const char *engine_id)
+{
+	unsigned long ssl_err = ERR_get_error();
+
+	fprintf(stderr, "Can not %s ECDSA engine '%s': %s\n", operation,
+		engine_id, ERR_error_string(ssl_err, NULL));
+
+	return -EIO;
+}
+
 static int read_pem_key(struct signer *ctx, const char *key_name)
 {
 	FILE *f = fopen(key_name, "r");
@@ -189,7 +199,11 @@ static int read_engine_key(struct signer *ctx,
 	if (info->keyfile) {
 		snprintf(key_id, sizeof(key_id), "%s", info->keyfile);
 	} else if (engine_id && !strcmp(engine_id, "pkcs11")) {
-		/* PKCS#11 uses a URI; generic engines use keydir as a prefix. */
+		/*
+		 * keydir is the PKCS#11 URI body, with keyname as its object
+		 * unless keydir already names one. Generic engines concatenate
+		 * keydir and keyname below.
+		 */
 		if (info->keydir) {
 			if (strstr(info->keydir, "object="))
 				snprintf(key_id, sizeof(key_id),
@@ -253,14 +267,11 @@ static int init_engine(struct signer *ctx, const char *engine_id)
 
 	ENGINE_load_builtin_engines();
 	ctx->engine = ENGINE_by_id(engine_id);
-	if (!ctx->engine) {
-		fprintf(stderr, "ECDSA engine '%s' is not available\n", engine_id);
-		return ecdsa_err("Engine lookup failed");
-	}
+	if (!ctx->engine)
+		return ecdsa_engine_err("find", engine_id);
 
 	if (!ENGINE_init(ctx->engine)) {
-		fprintf(stderr, "Can not initialize ECDSA engine '%s'\n", engine_id);
-		ecdsa_err("Engine initialization failed");
+		ecdsa_engine_err("initialize", engine_id);
 		ENGINE_free(ctx->engine);
 		ctx->engine = NULL;
 		return -EIO;
@@ -268,8 +279,7 @@ static int init_engine(struct signer *ctx, const char *engine_id)
 
 	key_pass = getenv("MKIMAGE_SIGN_PIN");
 	if (key_pass && !ENGINE_ctrl_cmd_string(ctx->engine, "PIN", key_pass, 0)) {
-		fprintf(stderr, "Can not set PIN for ECDSA engine '%s'\n", engine_id);
-		ecdsa_err("Engine PIN setup failed");
+		ecdsa_engine_err("set PIN for", engine_id);
 		ENGINE_finish(ctx->engine);
 		ENGINE_free(ctx->engine);
 		ctx->engine = NULL;
