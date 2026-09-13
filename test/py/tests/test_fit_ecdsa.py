@@ -52,8 +52,13 @@ class SignableFitImage(object):
         for image in self.signable_nodes:
             self.__fdt_set(f'{image}/signature', algo='sha256,ecdsa256')
 
-    def sign(self, mkimage, key_file):
-        util.run_and_log(self.cons, [mkimage, '-F', self.fit, f'-G{key_file}'])
+    def sign(self, mkimage, key_file, engine=None, key_dtb=None):
+        args = [mkimage, '-F', self.fit, f'-G{key_file}']
+        if engine:
+            args.extend(['-N', engine])
+        if key_dtb:
+            args.extend(['-K', key_dtb])
+        util.run_and_log(self.cons, args)
 
     def check_signatures(self, key):
         for image in self.signable_nodes:
@@ -111,3 +116,53 @@ def test_fit_ecdsa(u_boot_console):
     fit.change_signature_algo_to_ecdsa()
     fit.sign(mkimage, key_file)
     fit.check_signatures(key)
+
+@pytest.mark.buildconfigspec('fit_signature')
+@pytest.mark.requiredtool('dtc')
+@pytest.mark.requiredtool('fdtget')
+@pytest.mark.requiredtool('fdtput')
+def test_fit_ecdsa_engine(u_boot_console):
+    """Test an externally configured OpenSSL ENGINE ECDSA key.
+
+    Set MKIMAGE_ECDSA_ENGINE, MKIMAGE_ECDSA_ENGINE_KEY, and
+    MKIMAGE_ECDSA_ENGINE_PUBLIC_KEY to enable this HSM/ENGINE integration test.
+    """
+    engine = os.environ.get('MKIMAGE_ECDSA_ENGINE')
+    key_id = os.environ.get('MKIMAGE_ECDSA_ENGINE_KEY')
+    public_key = os.environ.get('MKIMAGE_ECDSA_ENGINE_PUBLIC_KEY')
+
+    if not all([engine, key_id, public_key]):
+        pytest.skip('Set MKIMAGE_ECDSA_ENGINE, MKIMAGE_ECDSA_ENGINE_KEY, and '
+                    'MKIMAGE_ECDSA_ENGINE_PUBLIC_KEY to test an ECDSA ENGINE')
+
+    cons = u_boot_console
+    mkimage = cons.config.build_dir + '/tools/mkimage'
+    datadir = cons.config.source_dir + '/test/py/tests/vboot/'
+    tempdir = os.path.join(cons.config.result_dir, 'ecdsa-engine')
+    fit_file = f'{tempdir}/test.fit'
+    key_dtb = f'{tempdir}/control.dtb'
+    os.makedirs(tempdir, exist_ok=True)
+
+    with open(f'{tempdir}/test-kernel.bin', 'w') as fd:
+        fd.write(500 * chr(0))
+    with open(f'{tempdir}/control.dts', 'w') as fd:
+        fd.write('/dts-v1/;\n/ { signature {}; };\n')
+    util.run_and_log(cons, f'dtc -I dts -O dtb -p 1024 '
+                     f'-o {key_dtb} {tempdir}/control.dts')
+    dtc_args = f'-I dts -O dtb -i {tempdir}'
+    util.run_and_log(cons, [mkimage, '-D', dtc_args, '-f',
+                            f'{datadir}/sign-images-sha256.its', fit_file])
+
+    fit = SignableFitImage(cons, fit_file)
+    fit.find_signable_image_nodes()
+    fit.change_signature_algo_to_ecdsa()
+    fit.sign(mkimage, key_id, engine, key_dtb)
+    with open(public_key, 'rt') as fd:
+        fit.check_signatures(ECC.import_key(fd.read()))
+
+    assert util.run_and_log(cons, f'fdtget -ts {key_dtb} /signature/default-key '
+                                  'ecdsa,curve') == 'prime256v1'
+    assert len(fit._SignableFitImage__fdt_get_binary(
+        '/signature/default-key', 'ecdsa,x-point')) == 32
+    assert len(fit._SignableFitImage__fdt_get_binary(
+        '/signature/default-key', 'ecdsa,y-point')) == 32

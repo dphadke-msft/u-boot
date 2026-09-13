@@ -510,6 +510,15 @@ device like a smartcard, USB token or Hardware Security Module (HSM) and have
 them perform the signing. PKCS#11 is standard for interfacing with these crypto
 device.
 
+ECDSA FIT signing supports the same OpenSSL ENGINE flow as RSA signing. With
+``-N <engine>``, mkimage passes the key identifier to
+``ENGINE_load_private_key()`` rather than opening it as a PEM file. The
+resulting signature remains the FIT raw fixed-width ``r || s`` encoding, and
+``-K`` extracts the public EC point from the ENGINE-returned key to write the
+usual ``ecdsa,curve``, ``ecdsa,x-point``, and ``ecdsa,y-point`` properties.
+The ENGINE must therefore return an EVP_PKEY with its public EC component;
+the private component need not be exportable.
+
 Requirements:
     - Smartcard/USB token/HSM which can work with some openssl engine
     - openssl
@@ -547,6 +556,20 @@ Generic engine key ids:
 
 or
     "<  key-name-hint>"
+
+For either PKCS#11 or a generic ENGINE, ``-G <key-id>`` supplies ``key-id``
+directly to the ENGINE. This is useful for a complete PKCS#11 URI and is not
+interpreted as a filesystem PEM path when ``-N`` is present.
+
+The host test ``test_fit_ecdsa_engine`` is intentionally enabled only when an
+ENGINE and a P-256 key are provisioned. For an HSM integration run, provide
+the engine name, its private-key identifier, and a PEM public key for
+independent signature verification::
+
+    MKIMAGE_ECDSA_ENGINE=pkcs11 \
+    MKIMAGE_ECDSA_ENGINE_KEY='pkcs11:object=fit-signing;type=private' \
+    MKIMAGE_ECDSA_ENGINE_PUBLIC_KEY=/path/to/fit-signing-public.pem \
+    ./test/py/test.py --build-dir /path/to/sandbox-build -k test_fit_ecdsa_engine
 
 In order to set the pin in the HSM, an environment variable "MKIMAGE_SIGN_PIN"
 can be specified.
