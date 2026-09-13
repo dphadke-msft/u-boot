@@ -110,7 +110,13 @@ static ECDSA_SIG *ecdsa_sig_from_raw(void *buf, size_t order)
 	s_buf = (uintptr_t)buf + point_bytes;
 	r = BN_bin2bn(buf, point_bytes, NULL);
 	s = BN_bin2bn((void *)s_buf, point_bytes, NULL);
-	if (!r || !s || !ECDSA_SIG_set0(sig, r, s)) {
+	if (!r || !s) {
+		BN_free(r);
+		BN_free(s);
+		ECDSA_SIG_free(sig);
+		return NULL;
+	}
+	if (!ECDSA_SIG_set0(sig, r, s)) {
 		BN_free(r);
 		BN_free(s);
 		ECDSA_SIG_free(sig);
@@ -136,7 +142,7 @@ static int default_password(char *buf, int size, int rwflag, void *u)
 	return strlen(buf);
 }
 
-static int ecdsa_err(const char *msg)
+static int ecdsa_report_ssl_err(const char *msg)
 {
 	unsigned long ssl_err = ERR_get_error();
 
@@ -196,6 +202,10 @@ static int read_engine_key(struct signer *ctx,
 	const char *engine_id = ENGINE_get_id(ctx->engine);
 	char key_id[ECDSA_KEY_ID_LEN];
 
+	/*
+	 * -G provides an opaque key identifier. Otherwise compose a PKCS#11
+	 * URI from keydir/keyname, or concatenate them for generic engines.
+	 */
 	if (info->keyfile) {
 		snprintf(key_id, sizeof(key_id), "%s", info->keyfile);
 	} else if (engine_id && !strcmp(engine_id, "pkcs11")) {
@@ -342,7 +352,7 @@ static int do_sign(struct signer *ctx, struct image_sign_info *info,
 	algo->calculate(algo->name, region, region_count, ctx->hash);
 	sig = ECDSA_do_sign(ctx->hash, algo->checksum_len, ctx->ecdsa_key);
 	if (!sig)
-		return ecdsa_err("ECDSA signing failed");
+		return ecdsa_report_ssl_err("ECDSA signing failed");
 
 	ecdsa_sig_encode_raw(ctx->signature, sig, info->crypto->key_len);
 	ECDSA_SIG_free(sig);
