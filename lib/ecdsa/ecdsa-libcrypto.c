@@ -25,13 +25,18 @@
 #include <openssl/ssl.h>
 #include <openssl/ec.h>
 #include <openssl/bn.h>
+#include <openssl/engine.h>
+#include <openssl/err.h>
+
+#define ECDSA_KEY_ID_LEN	1024
 
 /* Image signing context for openssl-libcrypto */
 struct signer {
 	EVP_PKEY *evp_key;	/* Pointer to EVP_PKEY object */
 	EC_KEY *ecdsa_key;	/* Pointer to EC_KEY object */
+	ENGINE *engine;		/* Engine used to load evp_key */
 	void *hash;		/* Pointer to hash used for verification */
-	void *signature;	/* Pointer to output signature. Do not free()!*/
+	void *signature;	/* Pointer to output signature */
 };
 
 static int alloc_ctx(struct signer *ctx, const struct image_sign_info *info)
@@ -62,6 +67,14 @@ static void free_ctx(struct signer *ctx)
 
 	if (ctx->hash)
 		free(ctx->hash);
+
+	if (ctx->signature)
+		free(ctx->signature);
+
+	if (ctx->engine) {
+		ENGINE_finish(ctx->engine);
+		ENGINE_free(ctx->engine);
+	}
 }
 
 /*
@@ -97,7 +110,18 @@ static ECDSA_SIG *ecdsa_sig_from_raw(void *buf, size_t order)
 	s_buf = (uintptr_t)buf + point_bytes;
 	r = BN_bin2bn(buf, point_bytes, NULL);
 	s = BN_bin2bn((void *)s_buf, point_bytes, NULL);
-	ECDSA_SIG_set0(sig, r, s);
+	if (!r || !s) {
+		BN_free(r);
+		BN_free(s);
+		ECDSA_SIG_free(sig);
+		return NULL;
+	}
+	if (!ECDSA_SIG_set0(sig, r, s)) {
+		BN_free(r);
+		BN_free(s);
+		ECDSA_SIG_free(sig);
+		return NULL;
+	}
 
 	return sig;
 }
@@ -118,7 +142,26 @@ static int default_password(char *buf, int size, int rwflag, void *u)
 	return strlen(buf);
 }
 
-static int read_key(struct signer *ctx, const char *key_name)
+static int ecdsa_report_ssl_err(const char *msg)
+{
+	unsigned long ssl_err = ERR_get_error();
+
+	fprintf(stderr, "%s: %s\n", msg, ERR_error_string(ssl_err, NULL));
+
+	return -EIO;
+}
+
+static int ecdsa_engine_err(const char *operation, const char *engine_id)
+{
+	unsigned long ssl_err = ERR_get_error();
+
+	fprintf(stderr, "Can not %s ECDSA engine '%s': %s\n", operation,
+		engine_id, ERR_error_string(ssl_err, NULL));
+
+	return -EIO;
+}
+
+static int read_pem_key(struct signer *ctx, const char *key_name)
 {
 	FILE *f = fopen(key_name, "r");
 	const char *key_pass;
@@ -153,29 +196,140 @@ static int read_key(struct signer *ctx, const char *key_name)
 	return (ctx->ecdsa_key) ? 0 : -EINVAL;
 }
 
+static int read_engine_key(struct signer *ctx,
+			   const struct image_sign_info *info)
+{
+	const char *engine_id = ENGINE_get_id(ctx->engine);
+	char key_id[ECDSA_KEY_ID_LEN];
+
+	/*
+	 * -G provides an opaque key identifier. Otherwise compose a PKCS#11
+	 * URI from keydir/keyname, or concatenate them for generic engines.
+	 */
+	if (info->keyfile) {
+		snprintf(key_id, sizeof(key_id), "%s", info->keyfile);
+	} else if (engine_id && !strcmp(engine_id, "pkcs11")) {
+		/*
+		 * keydir is the PKCS#11 URI body, with keyname as its object
+		 * unless keydir already names one. Generic engines concatenate
+		 * keydir and keyname below.
+		 */
+		if (info->keydir) {
+			if (strstr(info->keydir, "object="))
+				snprintf(key_id, sizeof(key_id),
+					 "pkcs11:%s;type=private", info->keydir);
+			else if (info->keyname)
+				snprintf(key_id, sizeof(key_id),
+					 "pkcs11:%s;object=%s;type=private",
+					 info->keydir, info->keyname);
+			else
+				goto err_key_id;
+		} else if (info->keyname) {
+			snprintf(key_id, sizeof(key_id),
+				 "pkcs11:object=%s;type=private", info->keyname);
+		} else {
+			goto err_key_id;
+		}
+	} else if (engine_id) {
+		if (info->keydir && info->keyname)
+			snprintf(key_id, sizeof(key_id), "%s%s", info->keydir,
+				 info->keyname);
+		else if (info->keyname)
+			snprintf(key_id, sizeof(key_id), "%s", info->keyname);
+		else
+			goto err_key_id;
+	} else {
+		goto err_key_id;
+	}
+
+	ctx->evp_key = ENGINE_load_private_key(ctx->engine, key_id, NULL, NULL);
+	if (!ctx->evp_key) {
+		unsigned long ssl_err = ERR_get_error();
+
+		fprintf(stderr, "Can not load ECDSA key '%s' from engine '%s': %s\n",
+			key_id, engine_id, ERR_error_string(ssl_err, NULL));
+		return -EIO;
+	}
+
+	if (EVP_PKEY_base_id(ctx->evp_key) != EVP_PKEY_EC) {
+		fprintf(stderr, "Engine key '%s' is not an ECDSA key\n", key_id);
+		return -EINVAL;
+	}
+
+	ctx->ecdsa_key = EVP_PKEY_get1_EC_KEY(ctx->evp_key);
+	if (!ctx->ecdsa_key) {
+		fprintf(stderr, "Can not extract ECDSA key from engine key '%s'\n",
+			key_id);
+		return -EINVAL;
+	}
+
+	return 0;
+
+err_key_id:
+	fprintf(stderr, "Can not derive ECDSA key identifier for engine '%s'; "
+		"use keyfile, keyname, or keydir with keyname\n", engine_id);
+	return -EINVAL;
+}
+
+static int init_engine(struct signer *ctx, const char *engine_id)
+{
+	const char *key_pass;
+
+	ENGINE_load_builtin_engines();
+	ctx->engine = ENGINE_by_id(engine_id);
+	if (!ctx->engine)
+		return ecdsa_engine_err("find", engine_id);
+
+	if (!ENGINE_init(ctx->engine)) {
+		ecdsa_engine_err("initialize", engine_id);
+		ENGINE_free(ctx->engine);
+		ctx->engine = NULL;
+		return -EIO;
+	}
+
+	key_pass = getenv("MKIMAGE_SIGN_PIN");
+	if (key_pass && !ENGINE_ctrl_cmd_string(ctx->engine, "PIN", key_pass, 0)) {
+		ecdsa_engine_err("set PIN for", engine_id);
+		ENGINE_finish(ctx->engine);
+		ENGINE_free(ctx->engine);
+		ctx->engine = NULL;
+		return -EIO;
+	}
+
+	return 0;
+}
+
 /* Prepare a 'signer' context that's ready to sign and verify. */
 static int prepare_ctx(struct signer *ctx, const struct image_sign_info *info)
 {
 	int key_len_bytes, ret;
-	char kname[1024];
+	char kname[ECDSA_KEY_ID_LEN];
 
 	memset(ctx, 0, sizeof(*ctx));
 
-	if (info->keyfile) {
-		snprintf(kname,  sizeof(kname), "%s", info->keyfile);
-	} else if (info->keydir && info->keyname) {
-		snprintf(kname, sizeof(kname), "%s/%s.pem", info->keydir,
-			 info->keyname);
-	} else {
-		fprintf(stderr, "keyfile, keyname, or key-name-hint missing\n");
-		return -EINVAL;
+	if (!info->engine_id) {
+		if (info->keyfile) {
+			snprintf(kname, sizeof(kname), "%s", info->keyfile);
+		} else if (info->keydir && info->keyname) {
+			snprintf(kname, sizeof(kname), "%s/%s.pem", info->keydir,
+				 info->keyname);
+		} else {
+			fprintf(stderr, "keyfile, keyname, or key-name-hint missing\n");
+			return -EINVAL;
+		}
 	}
 
 	ret = alloc_ctx(ctx, info);
 	if (ret)
 		return ret;
 
-	ret = read_key(ctx, kname);
+	if (info->engine_id) {
+		ret = init_engine(ctx, info->engine_id);
+		if (!ret)
+			ret = read_engine_key(ctx, info);
+	} else {
+		ret = read_pem_key(ctx, kname);
+	}
 	if (ret)
 		return ret;
 
@@ -197,8 +351,11 @@ static int do_sign(struct signer *ctx, struct image_sign_info *info,
 
 	algo->calculate(algo->name, region, region_count, ctx->hash);
 	sig = ECDSA_do_sign(ctx->hash, algo->checksum_len, ctx->ecdsa_key);
+	if (!sig)
+		return ecdsa_report_ssl_err("ECDSA signing failed");
 
 	ecdsa_sig_encode_raw(ctx->signature, sig, info->crypto->key_len);
+	ECDSA_SIG_free(sig);
 
 	return 0;
 }
@@ -246,11 +403,14 @@ int ecdsa_sign(struct image_sign_info *info, const struct image_region region[],
 
 	ret = prepare_ctx(&ctx, info);
 	if (ret >= 0) {
-		do_sign(&ctx, info, region, region_count);
-		*sigp = ctx.signature;
-		*sig_len = info->crypto->key_len * 2;
-
-		ret = ecdsa_check_signature(&ctx, info);
+		ret = do_sign(&ctx, info, region, region_count);
+		if (!ret)
+			ret = ecdsa_check_signature(&ctx, info);
+		if (!ret) {
+			*sigp = ctx.signature;
+			*sig_len = info->crypto->key_len * 2;
+			ctx.signature = NULL;
+		}
 	}
 
 	free_ctx(&ctx);
@@ -278,7 +438,7 @@ static int do_add(struct signer *ctx, void *fdt, const char *key_node_name)
 	const char *curve_name;
 	const EC_GROUP *group;
 	const EC_POINT *point;
-	BIGNUM *x, *y;
+	BIGNUM *x = NULL, *y = NULL;
 
 	signature_node = fdt_subnode_offset(fdt, 0, FIT_SIG_NODENAME);
 	if (signature_node < 0) {
@@ -297,25 +457,34 @@ static int do_add(struct signer *ctx, void *fdt, const char *key_node_name)
 	group = EC_KEY_get0_group(ctx->ecdsa_key);
 	key_bits = EC_GROUP_order_bits(group);
 	curve_name = OBJ_nid2sn(EC_GROUP_get_curve_name(group));
-	/* Let 'x' and 'y' memory leak by not BN_free()'ing them. */
 	x = BN_new();
 	y = BN_new();
+	if (!x || !y) {
+		ret = -ENOMEM;
+		goto done;
+	}
 	point = EC_KEY_get0_public_key(ctx->ecdsa_key);
-	EC_POINT_get_affine_coordinates(group, point, x, y, NULL);
+	if (!point || !EC_POINT_get_affine_coordinates(group, point, x, y, NULL)) {
+		ret = -EINVAL;
+		goto done;
+	}
 
 	ret = fdt_setprop_string(fdt, key_node, "ecdsa,curve", curve_name);
 	if (ret < 0)
-		return ret;
+		goto done;
 
 	ret = fdt_add_bignum(fdt, key_node, "ecdsa,x-point", x, key_bits);
 	if (ret < 0)
-		return ret;
+		goto done;
 
 	ret = fdt_add_bignum(fdt, key_node, "ecdsa,y-point", y, key_bits);
-	if (ret < 0)
-		return ret;
+	if (ret >= 0)
+		ret = key_node;
 
-	return key_node;
+done:
+	BN_free(x);
+	BN_free(y);
+	return ret;
 }
 
 int ecdsa_add_verify_data(struct image_sign_info *info, void *fdt)
